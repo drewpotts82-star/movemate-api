@@ -92,7 +92,7 @@ app.post('/leads', async (req, res) => {
       .from('partners')
       .select('*')
       .gt('credits', 0)  // Only partners with credits
-      .contains('cities', [city || other_location])
+      .overlaps('cities', [city || other_location])
       .overlaps('services', serviceTypes);
 
     // Notify matching partners
