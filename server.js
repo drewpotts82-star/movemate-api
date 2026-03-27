@@ -25,15 +25,16 @@ const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_T
   : null;
 
 // Email transporter (fallback if no Twilio)
-const mailer = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
+
+ const mailer = nodemailer.createTransport({
+  host: 'smtp.zoho.com',
+  port: 465,
+  secure: true,
   auth: {
-    user: process.env.EMAIL_USER || 'hello@movemate.au',
-    pass: process.env.EMAIL_PASS
+    user: process.env.ZOHO_USER,
+    pass: process.env.ZOHO_PASSWORD
   }
 });
-
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'MoveMate API is running', version: '1.0.0' });
