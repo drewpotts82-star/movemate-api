@@ -95,18 +95,17 @@ app.post('/leads', async (req, res) => {
       .overlaps('cities', [city || other_location])
       .overlaps('services', serviceTypes);
 
-    // Notify matching partners
-    if (partners && partners.length > 0) {
-      for (const partner of partners) {
-        await notifyPartner(partner, lead);
-      }
-      console.log(`Lead ${lead.id} matched to ${partners.length} partners in ${city}`);
-    } else {
-      // No direct match — notify admin to manually match
-      await notifyAdmin(lead);
-      console.log(`Lead ${lead.id} — no partners found in ${city}, notified admin`);
-    }
-
+   // Notify matching partners
+if (partners && partners.length > 0) {
+  for (const partner of partners) {
+    notifyPartner(partner, lead).catch(e => console.log('Notify error:', e.message));
+  }
+  console.log(`Lead ${lead.id} matched to ${partners.length} partners in ${city}`);
+} else {
+  // No direct match — notify admin to manually match
+  notifyAdmin(lead).catch(e => console.log('Admin notify error:', e.message));
+  console.log(`Lead ${lead.id} — no partners found in ${city}, notified admin`);
+}
     res.json({ 
       success: true, 
       leadId: lead.id,
