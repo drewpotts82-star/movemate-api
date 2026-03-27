@@ -85,15 +85,15 @@ app.post('/leads', async (req, res) => {
 
     if (error) throw error;
 
-    // Find matching partners for this city/service
-    const serviceTypes = (services || '').split('+').map(s => s.trim());
-    
-    const { data: partners } = await supabase
-      .from('partners')
-      .select('*')
-      .gt('credits', 0)  // Only partners with credits
-      .overlaps('cities', [city || other_location])
-      .overlaps('services', serviceTypes);
+   const { data: allPartners } = await supabase
+  .from('partners')
+  .select('*')
+  .gt('credits', 0);
+
+const partners = (allPartners || []).filter(p =>
+  p.cities && p.cities.includes(city || other_location) &&
+  p.services && serviceTypes.some(s => p.services.includes(s))
+);
 
    // Notify matching partners
 if (partners && partners.length > 0) {
