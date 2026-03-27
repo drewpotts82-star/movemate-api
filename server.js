@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -10,23 +11,20 @@ const app = express();
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 app.use(cors({ origin: ['https://movemate.au', 'https://www.movemate.au', 'http://localhost:3000'] }));
-// Raw body for Stripe webhooks
 app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ── CLIENTS ───────────────────────────────────────────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY  // Use service key on backend for full access
+  process.env.SUPABASE_SERVICE_KEY
 );
 
 const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
   ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
   : null;
 
-// Email transporter (fallback if no Twilio)
-
- const mailer = nodemailer.createTransport({
+const mailer = nodemailer.createTransport({
   host: 'smtp.zoho.com',
   port: 587,
   secure: false,
@@ -35,20 +33,11 @@ const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_T
     pass: process.env.ZOHO_PASSWORD
   }
 });
+
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'MoveMate API is running', version: '1.0.0' });
 });
-
-// ── CITY → NEAREST PARTNER MATCHING ──────────────────────────────────────────
-// Haversine formula for distance
-function haversine(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
 
 // ── POST /leads — Submit a customer lead ──────────────────────────────────────
 app.post('/leads', async (req, res) => {
@@ -63,11 +52,13 @@ app.post('/leads', async (req, res) => {
       return res.status(400).json({ error: 'Name, phone and city are required' });
     }
 
+    const resolvedCity = city || other_location;
+
     // Save lead to Supabase
     const { data: lead, error } = await supabase
       .from('leads')
       .insert({
-        city: city || other_location,
+        city: resolvedCity,
         services,
         from_suburb,
         to_suburb,
@@ -84,38 +75,104 @@ app.post('/leads', async (req, res) => {
       .single();
 
     if (error) throw error;
-const serviceTypes = (services || '').split('+').map(s => s.trim());
-   const { data: allPartners } = await supabase
-  .from('partners')
-  .select('*')
-  .gt('credits', 0);
 
-const partners = (allPartners || []).filter(p =>
-  p.cities && p.cities.includes(city || other_location) &&
-  p.services && serviceTypes.some(s => p.services.includes(s))
-);
+    // Split services into individual types
+    const serviceTypes = (services || '').split('+').map(s => s.trim()).filter(Boolean);
 
-   // Notify matching partners
-if (partners && partners.length > 0) {
-  for (const partner of partners) {
-    notifyPartner(partner, lead).catch(e => console.log('Notify error:', e.message));
-  }
-  console.log(`Lead ${lead.id} matched to ${partners.length} partners in ${city}`);
-} else {
-  // No direct match — notify admin to manually match
-  notifyAdmin(lead).catch(e => console.log('Admin notify error:', e.message));
-  console.log(`Lead ${lead.id} — no partners found in ${city}, notified admin`);
-}
-    res.json({ 
-      success: true, 
+    // Get ALL partners in this city with credits
+    const { data: allPartners } = await supabase
+      .from('partners')
+      .select('*')
+      .gt('credits', 0);
+
+    const cityPartners = (allPartners || []).filter(p =>
+      p.cities && p.cities.includes(resolvedCity)
+    );
+
+    let totalNotified = 0;
+
+    // ── Notify each service type separately ──────────────────────────────────
+    for (const serviceType of serviceTypes) {
+      const matchedPartners = cityPartners.filter(p =>
+        p.services && p.services.includes(serviceType)
+      );
+
+      if (matchedPartners.length > 0) {
+        for (const partner of matchedPartners) {
+          notifyPartner(partner, lead, serviceType).catch(e =>
+            console.log(`Notify error (${serviceType}):`, e.message)
+          );
+          totalNotified++;
+        }
+        console.log(`Lead ${lead.id} — ${serviceType}: notified ${matchedPartners.length} partners in ${resolvedCity}`);
+      } else {
+        // No partners for this service type — notify admin
+        notifyAdmin(lead, serviceType).catch(e =>
+          console.log('Admin notify error:', e.message)
+        );
+        console.log(`Lead ${lead.id} — ${serviceType}: no partners in ${resolvedCity}, notified admin`);
+      }
+    }
+
+    res.json({
+      success: true,
       leadId: lead.id,
-      matchedPartners: partners?.length || 0,
+      matchedPartners: totalNotified,
       message: 'Your request has been sent to local providers!'
     });
 
   } catch (err) {
     console.error('Lead submission error:', err);
     res.status(500).json({ error: 'Failed to submit lead', details: err.message });
+  }
+});
+
+// ── GET /partners/login — Login by phone number ───────────────────────────────
+app.get('/partners/login', async (req, res) => {
+  try {
+    const phone = req.query.phone;
+    if (!phone) return res.status(400).json({ error: 'Phone required' });
+
+    // Try both formatted and raw phone
+    const formatted = formatAusPhone(phone);
+    const { data: partner } = await supabase
+      .from('partners')
+      .select('*')
+      .or(`phone.eq.${formatted},phone.eq.${phone}`)
+      .single();
+
+    if (!partner) return res.status(404).json({ error: 'Partner not found' });
+
+    // Get available leads for this partner
+    const { data: leads } = await supabase
+      .from('leads')
+      .select('*')
+      .in('city', partner.cities || [])
+      .eq('status', 'new')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    // Filter leads by partner's services
+    const relevantLeads = (leads || []).filter(l =>
+      l.services && partner.services &&
+      partner.services.some(s => l.services.includes(s))
+    );
+
+    // Get unlocked leads
+    const { data: unlocked } = await supabase
+      .from('lead_unlocks')
+      .select('lead_id, unlocked_at, leads(*)')
+      .eq('partner_id', partner.id)
+      .order('unlocked_at', { ascending: false });
+
+    res.json({
+      partner,
+      availableLeads: relevantLeads,
+      unlockedLeads: unlocked || []
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -128,24 +185,24 @@ app.post('/partners/register', async (req, res) => {
       return res.status(400).json({ error: 'Business name and phone are required' });
     }
 
-    // Check if partner already exists
+    const formattedPhone = formatAusPhone(phone);
+
     const { data: existing } = await supabase
       .from('partners')
       .select('id')
-      .eq('phone', phone)
+      .or(`phone.eq.${formattedPhone},phone.eq.${phone}`)
       .single();
 
     if (existing) {
       return res.status(409).json({ error: 'Partner already registered with this phone number' });
     }
 
-    // Create partner with 2 free credits
     const { data: partner, error } = await supabase
       .from('partners')
       .insert({
         business_name,
         contact_name,
-        phone,
+        phone: formattedPhone,
         email,
         services: services || ['Removals'],
         cities: cities || [],
@@ -157,30 +214,32 @@ app.post('/partners/register', async (req, res) => {
 
     if (error) throw error;
 
-    // Send welcome SMS
+    // Welcome SMS
     if (twilioClient) {
-      await twilioClient.messages.create({
+      twilioClient.messages.create({
         body: `Welcome to MoveMate, ${business_name}! You have 2 free leads waiting. Log in at movemate.au to unlock them.`,
         from: process.env.TWILIO_PHONE,
-        to: formatAusPhone(phone)
-      });
+        to: formattedPhone
+      }).catch(e => console.log('Welcome SMS error:', e.message));
     }
 
     // Welcome email
-    await mailer.sendMail({
-      from: 'MoveMate <hello@movemate.au>',
-      to: email,
-      subject: 'Welcome to MoveMate — Your 2 free leads are ready',
-      html: `
-        <h2>Welcome to MoveMate, ${business_name}!</h2>
-        <p>You're now a verified MoveMate partner. You have <strong>2 free leads</strong> ready to unlock.</p>
-        <p><a href="https://movemate.au" style="background:#1a5cf8;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;">View My Leads →</a></p>
-        <p>Questions? Reply to this email or contact hello@movemate.au</p>
-      `
-    }).catch(e => console.log('Email error:', e.message));
+    if (email) {
+      mailer.sendMail({
+        from: `MoveMate <${process.env.ZOHO_USER}>`,
+        to: email,
+        subject: 'Welcome to MoveMate — Your 2 free leads are ready',
+        html: `
+          <h2>Welcome to MoveMate, ${business_name}!</h2>
+          <p>You're now a verified MoveMate partner. You have <strong>2 free leads</strong> ready to unlock.</p>
+          <p><a href="https://movemate.au" style="background:#1a5cf8;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;">View My Leads →</a></p>
+          <p>Questions? Reply to this email or contact hello@movemate.au</p>
+        `
+      }).catch(e => console.log('Welcome email error:', e.message));
+    }
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       partnerId: partner.id,
       credits: 2,
       message: 'Registration successful! Check your SMS for next steps.'
@@ -203,7 +262,6 @@ app.get('/partners/:id', async (req, res) => {
 
     if (error || !partner) return res.status(404).json({ error: 'Partner not found' });
 
-    // Get available leads for this partner's cities/services
     const { data: leads } = await supabase
       .from('leads')
       .select('*')
@@ -212,7 +270,11 @@ app.get('/partners/:id', async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(20);
 
-    // Get unlocked leads
+    const relevantLeads = (leads || []).filter(l =>
+      l.services && partner.services &&
+      partner.services.some(s => l.services.includes(s))
+    );
+
     const { data: unlocked } = await supabase
       .from('lead_unlocks')
       .select('lead_id, unlocked_at, leads(*)')
@@ -221,7 +283,7 @@ app.get('/partners/:id', async (req, res) => {
 
     res.json({
       partner,
-      availableLeads: leads || [],
+      availableLeads: relevantLeads,
       unlockedLeads: unlocked || []
     });
 
@@ -235,7 +297,6 @@ app.post('/partners/unlock', async (req, res) => {
   try {
     const { partnerId, leadId } = req.body;
 
-    // Get partner
     const { data: partner } = await supabase
       .from('partners')
       .select('*')
@@ -247,7 +308,6 @@ app.post('/partners/unlock', async (req, res) => {
       return res.status(402).json({ error: 'No credits remaining. Please top up.' });
     }
 
-    // Check not already unlocked
     const { data: existing } = await supabase
       .from('lead_unlocks')
       .select('id')
@@ -257,7 +317,6 @@ app.post('/partners/unlock', async (req, res) => {
 
     if (existing) return res.status(409).json({ error: 'Lead already unlocked' });
 
-    // Get lead details
     const { data: lead } = await supabase
       .from('leads')
       .select('*')
@@ -266,7 +325,6 @@ app.post('/partners/unlock', async (req, res) => {
 
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-    // Deduct credit (Gold tier has unlimited)
     if (partner.tier !== 'gold') {
       await supabase
         .from('partners')
@@ -274,18 +332,15 @@ app.post('/partners/unlock', async (req, res) => {
         .eq('id', partnerId);
     }
 
-    // Record unlock
     await supabase
       .from('lead_unlocks')
       .insert({ lead_id: leadId, partner_id: partnerId });
 
-    // Return full lead details to partner
     res.json({
       success: true,
       creditsRemaining: partner.tier === 'gold' ? 'unlimited' : partner.credits - 1,
       lead: {
         ...lead,
-        // Full contact details now revealed
         customerName: lead.name,
         customerPhone: lead.phone
       }
@@ -302,10 +357,10 @@ app.post('/checkout', async (req, res) => {
     const { priceId, partnerId, partnerEmail } = req.body;
 
     const PRICE_TO_CREDITS = {
-      [process.env.STRIPE_PRICE_BASIC]:    { credits: 15,  tier: 'starter' },
-      [process.env.STRIPE_PRICE_VALUE]:    { credits: 30,  tier: 'starter' },
-      [process.env.STRIPE_PRICE_GOLD]:     { credits: 999, tier: 'gold'    },
-      [process.env.STRIPE_PRICE_SINGLE]:   { credits: 1,   tier: 'starter' },
+      [process.env.STRIPE_PRICE_BASIC]:  { credits: 15,  tier: 'starter' },
+      [process.env.STRIPE_PRICE_VALUE]:  { credits: 30,  tier: 'starter' },
+      [process.env.STRIPE_PRICE_GOLD]:   { credits: 999, tier: 'gold'    },
+      [process.env.STRIPE_PRICE_SINGLE]: { credits: 1,   tier: 'starter' },
     };
 
     const pack = PRICE_TO_CREDITS[priceId];
@@ -328,7 +383,7 @@ app.post('/checkout', async (req, res) => {
   }
 });
 
-// ── POST /webhook/stripe — Handle Stripe payment confirmations ────────────────
+// ── POST /webhook/stripe ──────────────────────────────────────────────────────
 app.post('/webhook/stripe', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -352,22 +407,18 @@ app.post('/webhook/stripe', async (req, res) => {
 
       if (partner) {
         const newCredits = tier === 'gold' ? 999 : (partner.credits + parseInt(credits));
-        
+
         await supabase
           .from('partners')
-          .update({ 
-            credits: newCredits,
-            tier: tier
-          })
+          .update({ credits: newCredits, tier })
           .eq('id', partnerId);
 
-        // SMS confirmation
         if (twilioClient && partner.phone) {
-          await twilioClient.messages.create({
+          twilioClient.messages.create({
             body: `MoveMate: Payment confirmed! ${tier === 'gold' ? 'Unlimited leads activated' : `${credits} credits added`}. Log in at movemate.au`,
             from: process.env.TWILIO_PHONE,
             to: formatAusPhone(partner.phone)
-          });
+          }).catch(e => console.log('Payment SMS error:', e.message));
         }
 
         console.log(`Partner ${partnerId} topped up: ${credits} credits, tier: ${tier}`);
@@ -379,10 +430,21 @@ app.post('/webhook/stripe', async (req, res) => {
 });
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
-async function notifyPartner(partner, lead) {
-  const message = `MoveMate New Lead 🏠\n${lead.services} — ${lead.city}\n${lead.from_suburb}${lead.to_suburb ? ' → ' + lead.to_suburb : ''}\n${lead.property_size} · ${lead.move_date || 'Flexible date'}\nLog in to unlock: movemate.au`;
 
-  // SMS via Twilio
+// Notify partner for a SPECIFIC service type only
+async function notifyPartner(partner, lead, serviceType) {
+  const serviceLabel = serviceType || lead.services;
+
+  const message =
+    `🚚 MoveMate New Lead!\n` +
+    `Service: ${serviceLabel}\n` +
+    `Location: ${lead.city}\n` +
+    `${lead.from_suburb ? 'From: ' + lead.from_suburb : ''}${lead.to_suburb ? ' → ' + lead.to_suburb : ''}\n` +
+    `${lead.property_size ? 'Property: ' + lead.property_size : ''}\n` +
+    `${lead.move_date ? 'Date: ' + lead.move_date : 'Date: Flexible'}\n` +
+    `Log in to unlock: movemate.au`;
+
+  // SMS
   if (twilioClient && partner.phone) {
     try {
       await twilioClient.messages.create({
@@ -390,60 +452,83 @@ async function notifyPartner(partner, lead) {
         from: process.env.TWILIO_PHONE,
         to: formatAusPhone(partner.phone)
       });
+      console.log(`✅ SMS sent to ${partner.business_name} for ${serviceLabel}`);
     } catch (e) {
-      console.log(`SMS failed for partner ${partner.id}:`, e.message);
+      console.log(`❌ SMS failed for ${partner.business_name}:`, e.message);
     }
   }
 
-  // Email fallback
+  // Email
   if (partner.email) {
-    await mailer.sendMail({
-      from: 'MoveMate Leads <hello@movemate.au>',
+    mailer.sendMail({
+      from: `MoveMate Leads <${process.env.ZOHO_USER}>`,
       to: partner.email,
-      subject: `New Lead: ${lead.services} in ${lead.city}`,
+      subject: `New ${serviceLabel} Lead — ${lead.city}`,
       html: `
-        <h2>New Lead Alert 🏠</h2>
-        <table style="border-collapse:collapse;width:100%">
-          <tr><td style="padding:8px;font-weight:bold">Service</td><td style="padding:8px">${lead.services}</td></tr>
-          <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">City</td><td style="padding:8px">${lead.city}</td></tr>
-          <tr><td style="padding:8px;font-weight:bold">Route</td><td style="padding:8px">${lead.from_suburb}${lead.to_suburb ? ' → ' + lead.to_suburb : ''}</td></tr>
-          <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">Property</td><td style="padding:8px">${lead.property_size}</td></tr>
-          <tr><td style="padding:8px;font-weight:bold">Move Date</td><td style="padding:8px">${lead.move_date || 'Flexible'}</td></tr>
-        </table>
-        <p style="margin-top:20px">
-          <a href="https://movemate.au" style="background:#1a5cf8;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">
-            Unlock Lead (1 credit) →
-          </a>
-        </p>
-        <p style="color:#666;font-size:12px">You received this because you're a verified MoveMate partner in ${lead.city}.</p>
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+          <div style="background:#1a1a2e;padding:20px;border-radius:8px 8px 0 0;">
+            <h2 style="color:white;margin:0;">🚚 New ${serviceLabel} Lead</h2>
+          </div>
+          <div style="background:#f9f9f9;padding:20px;border-radius:0 0 8px 8px;border:1px solid #eee;">
+            <p>Hi ${partner.business_name}, you have a new lead!</p>
+            <table style="width:100%;border-collapse:collapse;">
+              <tr style="background:#fff;border-bottom:1px solid #eee;">
+                <td style="padding:8px;font-weight:bold;">Service</td>
+                <td style="padding:8px;">${serviceLabel}</td>
+              </tr>
+              <tr style="background:#f5f5f5;border-bottom:1px solid #eee;">
+                <td style="padding:8px;font-weight:bold;">City</td>
+                <td style="padding:8px;">${lead.city}</td>
+              </tr>
+              <tr style="background:#fff;border-bottom:1px solid #eee;">
+                <td style="padding:8px;font-weight:bold;">Route</td>
+                <td style="padding:8px;">${lead.from_suburb || ''}${lead.to_suburb ? ' → ' + lead.to_suburb : ''}</td>
+              </tr>
+              <tr style="background:#f5f5f5;border-bottom:1px solid #eee;">
+                <td style="padding:8px;font-weight:bold;">Property</td>
+                <td style="padding:8px;">${lead.property_size || 'Not specified'}</td>
+              </tr>
+              <tr style="background:#fff;">
+                <td style="padding:8px;font-weight:bold;">Move Date</td>
+                <td style="padding:8px;">${lead.move_date || 'Flexible'}</td>
+              </tr>
+            </table>
+            <div style="text-align:center;margin-top:20px;">
+              <a href="https://movemate.au" style="background:#1a5cf8;color:white;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
+                Unlock Lead (1 credit) →
+              </a>
+            </div>
+            <p style="color:#999;font-size:11px;margin-top:16px;text-align:center;">
+              MoveMate · movemate.au · You're a verified partner in ${lead.city}.
+            </p>
+          </div>
+        </div>
       `
-    }).catch(e => console.log('Email error:', e.message));
+    }).catch(e => console.log('Partner email error:', e.message));
   }
 }
 
-async function notifyAdmin(lead) {
-  await mailer.sendMail({
-    from: 'MoveMate System <hello@movemate.au>',
-    to: 'hello@movemate.au',
-    subject: `⚠️ Unmatched Lead — ${lead.city} — ${lead.services}`,
+async function notifyAdmin(lead, serviceType) {
+  mailer.sendMail({
+    from: `MoveMate System <${process.env.ZOHO_USER}>`,
+    to: process.env.ZOHO_USER,
+    subject: `⚠️ Unmatched ${serviceType} Lead — ${lead.city}`,
     html: `
       <h2>Unmatched Lead — Manual Action Required</h2>
-      <p>No partners found for this lead. Please match manually.</p>
+      <p>No ${serviceType} partners found in ${lead.city}.</p>
       <table style="border-collapse:collapse;width:100%">
-        <tr><td style="padding:8px;font-weight:bold">Lead ID</td><td style="padding:8px">${lead.id}</td></tr>
+        <tr><td style="padding:8px;font-weight:bold">Service</td><td style="padding:8px">${serviceType}</td></tr>
         <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">City</td><td style="padding:8px">${lead.city}</td></tr>
-        <tr><td style="padding:8px;font-weight:bold">Service</td><td style="padding:8px">${lead.services}</td></tr>
-        <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">Customer</td><td style="padding:8px">${lead.name} — ${lead.phone}</td></tr>
-        <tr><td style="padding:8px;font-weight:bold">Route</td><td style="padding:8px">${lead.from_suburb} → ${lead.to_suburb}</td></tr>
-        <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">Property</td><td style="padding:8px">${lead.property_size}</td></tr>
-        <tr><td style="padding:8px;font-weight:bold">Move Date</td><td style="padding:8px">${lead.move_date || 'Flexible'}</td></tr>
+        <tr><td style="padding:8px;font-weight:bold">Customer</td><td style="padding:8px">${lead.name} — ${lead.phone}</td></tr>
+        <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">Route</td><td style="padding:8px">${lead.from_suburb || ''} → ${lead.to_suburb || ''}</td></tr>
+        <tr><td style="padding:8px;font-weight:bold">Property</td><td style="padding:8px">${lead.property_size || ''}</td></tr>
+        <tr style="background:#f5f5f5"><td style="padding:8px;font-weight:bold">Move Date</td><td style="padding:8px">${lead.move_date || 'Flexible'}</td></tr>
       </table>
     `
   }).catch(e => console.log('Admin email error:', e.message));
 }
 
 function formatAusPhone(phone) {
-  // Convert 04XX XXX XXX to +614XX XXX XXX
   const cleaned = phone.replace(/\s/g, '');
   if (cleaned.startsWith('0')) return '+61' + cleaned.slice(1);
   if (cleaned.startsWith('+61')) return cleaned;
@@ -458,4 +543,3 @@ app.listen(PORT, () => {
   console.log(`Stripe: ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌ missing'}`);
   console.log(`Twilio: ${process.env.TWILIO_ACCOUNT_SID ? '✅' : '❌ missing'}`);
 });
-
