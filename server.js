@@ -84,7 +84,7 @@ app.post('/leads', async (req, res) => {
       .single();
 
     if (error) throw error;
-
+const serviceTypes = (services || '').split('+').map(s => s.trim());
    const { data: allPartners } = await supabase
   .from('partners')
   .select('*')
