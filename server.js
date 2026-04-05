@@ -4,7 +4,6 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const twilio = require('twilio');
-const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -23,21 +22,9 @@ const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_T
   ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
   : null;
 
-const emailTransporter = process.env.ZOHO_USER && process.env.ZOHO_PASSWORD
-  ? nodemailer.createTransport({
-      host: 'smtp.zoho.com',
-      port: 465,
-      secure: true,
-      auth: {
-        user: process.env.ZOHO_USER,
-        pass: process.env.ZOHO_PASSWORD
-      }
-    })
-  : null;
-
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ status: 'MoveMate API running', version: '2.2.0', model: 'sms-email-blast' });
+  res.json({ status: 'MoveMate API running', version: '2.0.0', model: 'sms-blast' });
 });
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -47,12 +34,6 @@ function formatAusPhone(phone) {
   if (cleaned.startsWith('0')) return '+61' + cleaned.slice(1);
   if (cleaned.startsWith('+61')) return cleaned;
   return '+61' + cleaned;
-}
-
-function isAusMobile(phone) {
-  if (!phone) return false;
-  const cleaned = phone.replace(/\s/g, '');
-  return cleaned.startsWith('04') || cleaned.startsWith('+614');
 }
 
 async function sendSMS(to, body) {
@@ -73,26 +54,6 @@ async function sendSMS(to, body) {
   }
 }
 
-async function sendEmail(to, subject, body) {
-  if (!emailTransporter) {
-    console.log(`[EMAIL SKIPPED] To: ${to} | ${subject}`);
-    return false;
-  }
-  try {
-    await emailTransporter.sendMail({
-      from: `MoveMate <${process.env.ZOHO_USER}>`,
-      to,
-      subject,
-      text: body
-    });
-    console.log(`[EMAIL SENT] To: ${to} | Subject: ${subject}`);
-    return true;
-  } catch (e) {
-    console.log(`Email failed to ${to}: ${e.message}`);
-    return false;
-  }
-}
-
 function buildLeadSMS(lead, service, city) {
   const cityShort = city.split(',')[0].trim();
   const date = lead.move_date ? ` · ${lead.move_date}` : '';
@@ -100,18 +61,6 @@ function buildLeadSMS(lead, service, city) {
   const route = lead.from_suburb ? ` · ${lead.from_suburb}${lead.to_suburb ? ' to ' + lead.to_suburb : ''}` : '';
   const apiBase = process.env.API_URL || 'https://movemate-api-production.up.railway.app';
   return `MoveMate: New ${service} job in ${cityShort}${size}${route}${date}. Max 3 businesses competing. Get client contact for $15: ${apiBase}/lead/${lead.id}`;
-}
-
-function buildLeadEmail(lead, service, city) {
-  const cityShort = city.split(',')[0].trim();
-  const date = lead.move_date ? ` on ${lead.move_date}` : '';
-  const size = lead.property_size ? `, ${lead.property_size}` : '';
-  const route = lead.from_suburb ? ` from ${lead.from_suburb}${lead.to_suburb ? ' to ' + lead.to_suburb : ''}` : '';
-  const apiBase = process.env.API_URL || 'https://movemate-api-production.up.railway.app';
-  return {
-    subject: `MoveMate: New ${service} job in ${cityShort}`,
-    body: `Hi,\n\nA new ${service} job has come in for ${cityShort}${size}${route}${date}.\n\nMax 3 businesses competing. Unlock customer contact for $15:\n${apiBase}/lead/${lead.id}\n\nMoveMate Team\nhello@movemate.au`
-  };
 }
 
 // ── POST /leads ───────────────────────────────────────────────────────────────
@@ -142,7 +91,7 @@ app.post('/leads', async (req, res) => {
 
     const { data: businesses } = await supabase
       .from('partners')
-      .select('id, business_name, phone, email, services, cities')
+      .select('id, business_name, phone, services, cities')
       .or(stateVariants.join(','));
 
     // Filter by service type
@@ -151,26 +100,18 @@ app.post('/leads', async (req, res) => {
       serviceTypes.some(st => b.services.includes(st))
     );
 
-    // Route by contact type — mobile gets SMS, landline gets email
+    // SMS blast to all matching businesses
     const serviceLabel = serviceTypes[0] || 'Moving';
     const smsBody = buildLeadSMS(lead, serviceLabel, cityName);
     let smsSent = 0;
-    let emailSent = 0;
 
     for (const biz of matchingBiz) {
-      if (isAusMobile(biz.phone)) {
+      if (biz.phone) {
         const sent = await sendSMS(biz.phone, smsBody);
         if (sent) smsSent++;
-      } else if (biz.email) {
-        const { subject, body } = buildLeadEmail(lead, serviceLabel, cityName);
-        const sent = await sendEmail(biz.email, subject, body);
-        if (sent) emailSent++;
-      } else {
-        console.log(`[SKIPPED] ${biz.business_name} — no mobile or email`);
       }
     }
 
-    // No businesses found — alert admin
     if (matchingBiz.length === 0) {
       const adminPhone = process.env.ADMIN_PHONE || '+61468167408';
       await sendSMS(adminPhone, `MoveMate ADMIN: Lead in ${cityShort} - no businesses found. ${name} ${phone} needs ${serviceLabel}.`);
@@ -179,7 +120,7 @@ app.post('/leads', async (req, res) => {
     // Confirm to customer
     await sendSMS(phone, `Hi ${name}! MoveMate has alerted local ${serviceLabel} providers in ${cityShort}. You will hear from them soon. Questions? hello@movemate.au`);
 
-    res.json({ success: true, leadId: lead.id, businessesNotified: smsSent, emailsNotified: emailSent });
+    res.json({ success: true, leadId: lead.id, businessesNotified: smsSent });
 
   } catch (err) {
     console.error('Lead error:', err);
@@ -302,11 +243,7 @@ app.post('/partners/register', async (req, res) => {
 
     if (error) throw error;
 
-    if (isAusMobile(phone)) {
-      await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new jobs in your area. Click the link to unlock customer contact for $15. movemate.au`);
-    } else if (email) {
-      await sendEmail(email, `Welcome to MoveMate, ${business_name}!`, `Hi,\n\nYou're now registered on MoveMate. You'll receive email alerts for new jobs in your area.\n\nClick the link in each alert to unlock customer contact for $15.\n\nmovemate.au`);
-    }
+    await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new jobs in your area. Click the link to unlock customer contact for $15. movemate.au`);
 
     res.json({ success: true, partnerId: partner.id });
 
@@ -353,14 +290,8 @@ app.post('/webhook/stripe', async (req, res) => {
 // ── START ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`MoveMate API v2.2 on port ${PORT}`);
+  console.log(`MoveMate API v2.0 on port ${PORT}`);
   console.log(`Supabase: ${process.env.SUPABASE_URL ? '✅' : '❌'}`);
   console.log(`Stripe: ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`Twilio: ${process.env.TWILIO_ACCOUNT_SID ? '✅' : '❌'}`);
-  console.log(`Email: ${process.env.ZOHO_USER ? '✅' : '❌'}`);
 });
-```
-
-Then run in Terminal:
-```
-cd ~/movemate-scraper && npm install nodemailer
