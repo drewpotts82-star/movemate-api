@@ -4,6 +4,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const twilio = require('twilio');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -22,9 +23,40 @@ const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_T
   ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
   : null;
 
+const emailTransporter = process.env.ZOHO_USER && process.env.ZOHO_PASSWORD
+  ? nodemailer.createTransport({
+      host: 'smtp.zoho.com',
+      port: 465,
+      secure: true,
+      auth: {
+        user: process.env.ZOHO_USER,
+        pass: process.env.ZOHO_PASSWORD
+      }
+    })
+  : null;
+
+// ── PRICING CONFIG ────────────────────────────────────────────────────────────
+// Set these in Railway environment variables:
+// STRIPE_PRICE_REMOVALIST  = price_xxx  (Single Removalist Lead $12)
+// STRIPE_PRICE_CLEANER     = price_xxx  (Single Cleaner Lead $8)
+// STRIPE_PRICE_STORAGE     = price_xxx  (Single Storage Lead $12)
+// STRIPE_PRICE_VALUE_30    = price_xxx  (30 Leads Value Pack $275)
+
+function getLeadPrice(service) {
+  const s = (service || '').toLowerCase();
+  if (s.includes('bond') || s.includes('clean')) {
+    return { priceId: process.env.STRIPE_PRICE_CLEANER, amount: 8, label: 'Cleaner Lead' };
+  }
+  if (s.includes('storage')) {
+    return { priceId: process.env.STRIPE_PRICE_STORAGE, amount: 12, label: 'Storage Lead' };
+  }
+  // Default: removalist
+  return { priceId: process.env.STRIPE_PRICE_REMOVALIST, amount: 12, label: 'Removalist Lead' };
+}
+
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ status: 'MoveMate API running', version: '2.0.0', model: 'sms-blast' });
+  res.json({ status: 'MoveMate API running', version: '2.3.0', model: 'pay-per-lead' });
 });
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -34,6 +66,12 @@ function formatAusPhone(phone) {
   if (cleaned.startsWith('0')) return '+61' + cleaned.slice(1);
   if (cleaned.startsWith('+61')) return cleaned;
   return '+61' + cleaned;
+}
+
+function isAusMobile(phone) {
+  if (!phone) return false;
+  const cleaned = phone.replace(/\s/g, '');
+  return cleaned.startsWith('04') || cleaned.startsWith('+614');
 }
 
 async function sendSMS(to, body) {
@@ -54,13 +92,47 @@ async function sendSMS(to, body) {
   }
 }
 
+async function sendEmail(to, subject, body) {
+  if (!emailTransporter) {
+    console.log(`[EMAIL SKIPPED] To: ${to} | ${subject}`);
+    return false;
+  }
+  try {
+    await emailTransporter.sendMail({
+      from: `MoveMate <${process.env.ZOHO_USER}>`,
+      to,
+      subject,
+      text: body
+    });
+    console.log(`[EMAIL SENT] To: ${to} | Subject: ${subject}`);
+    return true;
+  } catch (e) {
+    console.log(`Email failed to ${to}: ${e.message}`);
+    return false;
+  }
+}
+
 function buildLeadSMS(lead, service, city) {
   const cityShort = city.split(',')[0].trim();
   const date = lead.move_date ? ` · ${lead.move_date}` : '';
   const size = lead.property_size ? ` · ${lead.property_size}` : '';
   const route = lead.from_suburb ? ` · ${lead.from_suburb}${lead.to_suburb ? ' to ' + lead.to_suburb : ''}` : '';
+  const { amount } = getLeadPrice(service);
   const apiBase = process.env.API_URL || 'https://movemate-api-production.up.railway.app';
-  return `MoveMate: New ${service} job in ${cityShort}${size}${route}${date}. Max 3 businesses competing. Get client contact for $15: ${apiBase}/lead/${lead.id}`;
+  return `MoveMate: New ${service} job in ${cityShort}${size}${route}${date}. Only 3 businesses max compete for this job. Unlock client contact for $${amount}: ${apiBase}/lead/${lead.id}`;
+}
+
+function buildLeadEmail(lead, service, city) {
+  const cityShort = city.split(',')[0].trim();
+  const date = lead.move_date ? ` on ${lead.move_date}` : '';
+  const size = lead.property_size ? `, ${lead.property_size}` : '';
+  const route = lead.from_suburb ? ` from ${lead.from_suburb}${lead.to_suburb ? ' to ' + lead.to_suburb : ''}` : '';
+  const { amount } = getLeadPrice(service);
+  const apiBase = process.env.API_URL || 'https://movemate-api-production.up.railway.app';
+  return {
+    subject: `MoveMate: New ${service} job in ${cityShort}`,
+    body: `Hi,\n\nA new ${service} job has come in for ${cityShort}${size}${route}${date}.\n\nOnly 3 businesses max compete for each job on MoveMate — giving you a real shot at winning the work.\n\nUnlock customer contact for $${amount}:\n${apiBase}/lead/${lead.id}\n\nMoveMate Team\nhello@movemate.au`
+  };
 }
 
 // ── POST /leads ───────────────────────────────────────────────────────────────
@@ -91,7 +163,7 @@ app.post('/leads', async (req, res) => {
 
     const { data: businesses } = await supabase
       .from('partners')
-      .select('id, business_name, phone, services, cities')
+      .select('id, business_name, phone, email, services, cities')
       .or(stateVariants.join(','));
 
     // Filter by service type
@@ -100,18 +172,25 @@ app.post('/leads', async (req, res) => {
       serviceTypes.some(st => b.services.includes(st))
     );
 
-    // SMS blast to all matching businesses
     const serviceLabel = serviceTypes[0] || 'Moving';
     const smsBody = buildLeadSMS(lead, serviceLabel, cityName);
     let smsSent = 0;
+    let emailSent = 0;
 
     for (const biz of matchingBiz) {
-      if (biz.phone) {
+      if (isAusMobile(biz.phone)) {
         const sent = await sendSMS(biz.phone, smsBody);
         if (sent) smsSent++;
+      } else if (biz.email) {
+        const { subject, body } = buildLeadEmail(lead, serviceLabel, cityName);
+        const sent = await sendEmail(biz.email, subject, body);
+        if (sent) emailSent++;
+      } else {
+        console.log(`[SKIPPED] ${biz.business_name} — no mobile or email`);
       }
     }
 
+    // No businesses found — alert admin
     if (matchingBiz.length === 0) {
       const adminPhone = process.env.ADMIN_PHONE || '+61468167408';
       await sendSMS(adminPhone, `MoveMate ADMIN: Lead in ${cityShort} - no businesses found. ${name} ${phone} needs ${serviceLabel}.`);
@@ -120,7 +199,7 @@ app.post('/leads', async (req, res) => {
     // Confirm to customer
     await sendSMS(phone, `Hi ${name}! MoveMate has alerted local ${serviceLabel} providers in ${cityShort}. You will hear from them soon. Questions? hello@movemate.au`);
 
-    res.json({ success: true, leadId: lead.id, businessesNotified: smsSent });
+    res.json({ success: true, leadId: lead.id, businessesNotified: smsSent, emailsNotified: emailSent });
 
   } catch (err) {
     console.error('Lead error:', err);
@@ -145,20 +224,29 @@ app.get('/lead/:id', async (req, res) => {
       .eq('lead_id', req.params.id);
 
     const spotsLeft = Math.max(0, 3 - (count || 0));
+    const { amount } = getLeadPrice(lead.services);
 
-    res.json({ lead, spotsLeft, alreadyClaimed: count || 0, available: spotsLeft > 0 });
+    res.json({
+      lead,
+      spotsLeft,
+      alreadyClaimed: count || 0,
+      available: spotsLeft > 0,
+      leadPrice: amount,
+      maxCompetitors: 3
+    });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /lead/:id/unlock — Start $15 Stripe checkout ─────────────────────────
+// ── POST /lead/:id/unlock — Stripe checkout (price based on service type) ─────
 app.post('/lead/:id/unlock', async (req, res) => {
   try {
     const { businessPhone, businessName } = req.body;
     const leadId = req.params.id;
 
+    // Check 3-spot cap
     const { count } = await supabase
       .from('lead_unlocks')
       .select('*', { count: 'exact', head: true })
@@ -168,6 +256,7 @@ app.post('/lead/:id/unlock', async (req, res) => {
       return res.status(402).json({ error: 'All 3 spots for this lead have been claimed.' });
     }
 
+    // Check not already unlocked by this business
     const { data: existing } = await supabase
       .from('lead_unlocks')
       .select('id')
@@ -177,18 +266,31 @@ app.post('/lead/:id/unlock', async (req, res) => {
 
     if (existing) return res.status(409).json({ error: 'You already unlocked this lead.' });
 
+    // Get lead to determine correct price
+    const { data: lead } = await supabase
+      .from('leads')
+      .select('services')
+      .eq('id', leadId)
+      .single();
+
+    const { priceId, amount } = getLeadPrice(lead ? lead.services : '');
+
+    if (!priceId) {
+      return res.status(500).json({ error: 'Stripe price not configured. Contact hello@movemate.au' });
+    }
+
     const apiBase = process.env.API_URL || 'https://movemate-api-production.up.railway.app';
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
-      line_items: [{ price: process.env.STRIPE_PRICE_SINGLE, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       mode: 'payment',
       success_url: `${apiBase}/lead/${leadId}/success?session_id={CHECKOUT_SESSION_ID}&phone=${encodeURIComponent(businessPhone)}`,
       cancel_url: `https://movemate.au/lead/${leadId}?cancelled=true`,
-      metadata: { leadId, businessPhone, businessName: businessName || '' }
+      metadata: { leadId, businessPhone, businessName: businessName || '', amount: String(amount) }
     });
 
-    res.json({ checkoutUrl: session.url });
+    res.json({ checkoutUrl: session.url, amount });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -220,7 +322,16 @@ app.get('/lead/:id/success', async (req, res) => {
 
     res.json({
       success: true,
-      customer: { name: lead.name, phone: lead.phone, city: lead.city, services: lead.services, from_suburb: lead.from_suburb, to_suburb: lead.to_suburb, property_size: lead.property_size, move_date: lead.move_date },
+      customer: {
+        name: lead.name,
+        phone: lead.phone,
+        city: lead.city,
+        services: lead.services,
+        from_suburb: lead.from_suburb,
+        to_suburb: lead.to_suburb,
+        property_size: lead.property_size,
+        move_date: lead.move_date
+      },
       spotsLeft: Math.max(0, 3 - (count || 0))
     });
 
@@ -235,15 +346,34 @@ app.post('/partners/register', async (req, res) => {
     const { business_name, contact_name, phone, email, services, cities } = req.body;
     if (!business_name || !phone) return res.status(400).json({ error: 'Business name and phone required' });
 
+    const serviceList = services || ['Removalists'];
+    const { amount } = getLeadPrice(serviceList[0]);
+
     const { data: partner, error } = await supabase
       .from('partners')
-      .upsert({ business_name, contact_name, phone, email, services: services || ['Removals'], cities: cities || [], credits: 0, tier: 'pay-per-lead', source: 'registered' }, { onConflict: 'phone' })
+      .upsert({
+        business_name,
+        contact_name,
+        phone,
+        email,
+        services: serviceList,
+        cities: cities || [],
+        credits: 0,
+        tier: 'pay-per-lead',
+        source: 'registered'
+      }, { onConflict: 'phone' })
       .select()
       .single();
 
     if (error) throw error;
 
-    await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new jobs in your area. Click the link to unlock customer contact for $15. movemate.au`);
+    const welcomeMsg = `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new ${serviceList[0]} jobs in your area. Only 3 businesses max compete per job — giving you a real shot. Unlock client contact for $${amount} per lead. movemate.au`;
+
+    if (isAusMobile(phone)) {
+      await sendSMS(phone, welcomeMsg);
+    } else if (email) {
+      await sendEmail(email, `Welcome to MoveMate, ${business_name}!`, welcomeMsg);
+    }
 
     res.json({ success: true, partnerId: partner.id });
 
@@ -252,21 +382,30 @@ app.post('/partners/register', async (req, res) => {
   }
 });
 
-// ── POST /checkout ────────────────────────────────────────────────────────────
+// ── POST /checkout — Top up lead credits (30 pack or single) ─────────────────
 app.post('/checkout', async (req, res) => {
   try {
-    const { priceId, partnerId, partnerEmail } = req.body;
-    const VALID = [process.env.STRIPE_PRICE_BASIC, process.env.STRIPE_PRICE_VALUE, process.env.STRIPE_PRICE_GOLD, process.env.STRIPE_PRICE_SINGLE];
-    if (!VALID.includes(priceId)) return res.status(400).json({ error: 'Invalid price' });
+    const { priceId, partnerId, partnerEmail, serviceType } = req.body;
+
+    // Work out valid price IDs based on service type
+    const { priceId: singlePrice } = getLeadPrice(serviceType || 'Removalists');
+    const VALID = [
+      singlePrice,
+      process.env.STRIPE_PRICE_VALUE_30
+    ].filter(Boolean);
+
+    if (!VALID.includes(priceId)) {
+      return res.status(400).json({ error: 'Invalid price' });
+    }
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: 1 }],
-      mode: priceId === process.env.STRIPE_PRICE_GOLD ? 'subscription' : 'payment',
+      mode: 'payment',
       success_url: `https://movemate.au?payment=success&partner=${partnerId}`,
       cancel_url: `https://movemate.au?payment=cancelled`,
       customer_email: partnerEmail,
-      metadata: { partnerId }
+      metadata: { partnerId, priceId }
     });
 
     res.json({ sessionId: session.id, url: session.url });
@@ -275,23 +414,63 @@ app.post('/checkout', async (req, res) => {
   }
 });
 
+// ── GET /pricing — Return pricing info for frontend ───────────────────────────
+app.get('/pricing', (req, res) => {
+  res.json({
+    removalist: { singleLead: 12, pack30: 275, saving: '24%' },
+    cleaner: { singleLead: 8, pack30: 275, saving: '14%' },
+    storage: { singleLead: 12, pack30: 275, saving: '24%' },
+    maxCompetitors: 3,
+    guarantee: 'Max 3 businesses compete per job — giving you a real shot at winning the work.'
+  });
+});
+
 // ── POST /webhook/stripe ──────────────────────────────────────────────────────
 app.post('/webhook/stripe', async (req, res) => {
   const sig = req.headers['stripe-signature'];
+  let event;
+
   try {
-    const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    console.log('Stripe webhook:', event.type);
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
+    console.log('Webhook signature failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
+
+  console.log('Stripe webhook:', event.type);
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const { partnerId, priceId } = session.metadata || {};
+
+    if (partnerId && priceId === process.env.STRIPE_PRICE_VALUE_30) {
+      // Add 30 credits
+      const { data: partner } = await supabase
+        .from('partners')
+        .select('credits, phone, business_name')
+        .eq('id', partnerId)
+        .single();
+
+      if (partner) {
+        const newCredits = (partner.credits || 0) + 30;
+        await supabase.from('partners').update({ credits: newCredits }).eq('id', partnerId);
+        console.log(`Added 30 credits to ${partner.business_name}. New total: ${newCredits}`);
+        if (partner.phone) {
+          await sendSMS(partner.phone, `MoveMate: 30 lead credits added to your account! You now have ${newCredits} credits. Use them to unlock job details as leads come in.`);
+        }
+      }
+    }
+  }
+
   res.json({ received: true });
 });
 
 // ── START ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`MoveMate API v2.0 on port ${PORT}`);
+  console.log(`MoveMate API v2.3 on port ${PORT}`);
   console.log(`Supabase: ${process.env.SUPABASE_URL ? '✅' : '❌'}`);
   console.log(`Stripe: ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`Twilio: ${process.env.TWILIO_ACCOUNT_SID ? '✅' : '❌'}`);
+  console.log(`Email: ${process.env.ZOHO_USER ? '✅' : '❌'}`);
 });
