@@ -265,7 +265,7 @@ app.post('/checkout', async (req, res) => {
       mode: priceId === process.env.STRIPE_PRICE_GOLD ? 'subscription' : 'payment',
       success_url: `https://movemate.au?payment=success&partner=${partnerId}`,
       cancel_url: `https://movemate.au?payment=cancelled`,
-      customer_email: partnerEmail,
+      customer_email: partnerEmail && partnerEmail.includes("@") ? partnerEmail : undefined,
       metadata: { partnerId }
     });
 
