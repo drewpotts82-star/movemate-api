@@ -64,6 +64,57 @@ function buildLeadSMS(lead, service, city) {
 }
 
 // ── POST /leads ───────────────────────────────────────────────────────────────
+
+// ── POST /auth/request-otp ───────────────────────────────────────────────────
+app.post('/auth/request-otp', async (req, res) => {
+  try {
+    const { contact } = req.body;
+    if (!contact) return res.status(400).json({ error: 'Mobile number or email required' });
+    const isEmail = contact.includes('@');
+    const { data: partner } = isEmail
+      ? await supabase.from('partners').select('id, business_name').eq('email', contact.toLowerCase()).maybeSingle()
+      : await supabase.from('partners').select('id, business_name').eq('phone', formatAusPhone(contact)).maybeSingle();
+    if (!partner) return res.status(404).json({ error: 'No account found. Please register first.' });
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await supabase.from('otp_codes').upsert({ contact: contact.toLowerCase(), code: otp, expires_at: expiresAt, used: false }, { onConflict: 'contact' });
+    const message = 'Your MoveMate login code is: ' + otp + '. Expires in 10 minutes.';
+    if (isEmail) {
+      await sendEmail(contact, 'Your MoveMate Login Code', message);
+    } else {
+      await sendSMS(contact, 'MoveMate login code: ' + otp + ' (expires 10 mins)');
+    }
+    const hint = isEmail
+      ? 'Code sent to ' + contact.split('@')[0].slice(0,3) + '***@' + contact.split('@')[1]
+      : 'Code sent to ' + contact.slice(0,4) + '****';
+    res.json({ success: true, method: isEmail ? 'email' : 'sms', hint });
+  } catch (err) {
+    console.error('OTP request error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /auth/verify-otp ─────────────────────────────────────────────────────
+app.post('/auth/verify-otp', async (req, res) => {
+  try {
+    const { contact, code } = req.body;
+    if (!contact || !code) return res.status(400).json({ error: 'Contact and code required' });
+    const { data: otp } = await supabase.from('otp_codes').select('*').eq('contact', contact.toLowerCase()).eq('code', code).eq('used', false).maybeSingle();
+    if (!otp) return res.status(401).json({ error: 'Invalid code. Please try again.' });
+    if (new Date(otp.expires_at) < new Date()) return res.status(401).json({ error: 'Code expired. Please request a new one.' });
+    await supabase.from('otp_codes').update({ used: true }).eq('contact', contact.toLowerCase());
+    const isEmail = contact.includes('@');
+    const { data: partner } = isEmail
+      ? await supabase.from('partners').select('*').eq('email', contact.toLowerCase()).maybeSingle()
+      : await supabase.from('partners').select('*').eq('phone', formatAusPhone(contact)).maybeSingle();
+    if (!partner) return res.status(404).json({ error: 'Account not found' });
+    res.json({ success: true, partner: { id: partner.id, business_name: partner.business_name, contact_name: partner.contact_name, phone: partner.phone, email: partner.email, services: partner.services, cities: partner.cities, credits: partner.credits || 0, tier: partner.tier } });
+  } catch (err) {
+    console.error('OTP verify error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/leads', async (req, res) => {
   try {
     const { city, services, from_suburb, to_suburb, property_size, move_date, name, phone, clean_type, storage_size, other_location } = req.body;
