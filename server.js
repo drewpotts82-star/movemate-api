@@ -92,8 +92,8 @@ app.post('/auth/request-otp', async (req, res) => {
     if (!contact) return res.status(400).json({ error: 'Mobile number or email required' });
     const isEmail = contact.includes('@');
     const { data: partner } = isEmail
-      ? await supabase.from('partners').select('id, business_name').eq('email', contact.toLowerCase()).maybeSingle()
-      : await supabase.from('partners').select('id, business_name').eq('phone', formatAusPhone(contact)).maybeSingle();
+      ? await supabase.from('partners').select('id, business_name').eq('email', contact.toLowerCase()).limit(1).maybeSingle()
+      : await supabase.from('partners').select('id, business_name').eq('phone', formatAusPhone(contact)).limit(1).maybeSingle();
     if (!partner) return res.status(404).json({ error: 'No account found. Please register first.' });
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
