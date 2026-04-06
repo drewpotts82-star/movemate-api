@@ -54,6 +54,26 @@ async function sendSMS(to, body) {
   }
 }
 
+async function sendEmail(to, subject, body) {
+  if (!emailTransporter) {
+    console.log('[EMAIL SKIPPED] To: ' + to + ' | ' + subject);
+    return false;
+  }
+  try {
+    await emailTransporter.sendMail({
+      from: 'MoveMate <' + process.env.ZOHO_USER + '>',
+      to: to,
+      subject: subject,
+      text: body
+    });
+    console.log('[EMAIL SENT] To: ' + to);
+    return true;
+  } catch(e) {
+    console.log('Email failed: ' + e.message);
+    return false;
+  }
+}
+
 function buildLeadSMS(lead, service, city) {
   const cityShort = city.split(',')[0].trim();
   const date = lead.move_date ? ` · ${lead.move_date}` : '';
