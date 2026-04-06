@@ -360,6 +360,15 @@ app.post('/webhook/stripe', async (req, res) => {
 });
 
 // ── START ─────────────────────────────────────────────────────────────────────
+const emailTransporter = process.env.ZOHO_USER && process.env.ZOHO_PASSWORD
+  ? require('nodemailer').createTransport({
+      host: 'smtp.zoho.com',
+      port: 465,
+      secure: true,
+      auth: { user: process.env.ZOHO_USER, pass: process.env.ZOHO_PASSWORD }
+    })
+  : null;
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`MoveMate API v2.0 on port ${PORT}`);
