@@ -233,7 +233,8 @@ app.get('/lead/:id/success', async (req, res) => {
 app.post('/partners/register', async (req, res) => {
   try {
     const { business_name, contact_name, phone, email, services, cities } = req.body;
-    if (!business_name || !phone) return res.status(400).json({ error: 'Business name and phone required' });
+    if (!business_name) return res.status(400).json({ error: 'Business name required' });
+    if (!phone && !email) return res.status(400).json({ error: 'Mobile number or email required' });
 
     const { data: partner, error } = await supabase
       .from('partners')
