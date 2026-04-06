@@ -257,7 +257,7 @@ app.post('/partners/register', async (req, res) => {
 app.post('/checkout', async (req, res) => {
   try {
     const { priceId, partnerId, partnerEmail } = req.body;
-    const VALID = [process.env.STRIPE_PRICE_BASIC, process.env.STRIPE_PRICE_VALUE, process.env.STRIPE_PRICE_GOLD, process.env.STRIPE_PRICE_SINGLE];
+    const VALID = [process.env.STRIPE_PRICE_REMOVALIST, process.env.STRIPE_PRICE_CLEANER, process.env.STRIPE_PRICE_STORAGE, process.env.STRIPE_PRICE_VALUE_30].filter(Boolean);
     if (!VALID.includes(priceId)) return res.status(400).json({ error: 'Invalid price' });
 
     const session = await stripe.checkout.sessions.create({
