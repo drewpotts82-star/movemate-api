@@ -362,9 +362,10 @@ app.post('/webhook/stripe', async (req, res) => {
 // ── START ─────────────────────────────────────────────────────────────────────
 const emailTransporter = process.env.ZOHO_USER && process.env.ZOHO_PASSWORD
   ? require('nodemailer').createTransport({
-      host: 'smtp.zoho.com',
-      port: 465,
-      secure: true,
+      host: 'smtp.zoho.com.au',
+      port: 587,
+      secure: false,
+      requireTLS: true,
       auth: { user: process.env.ZOHO_USER, pass: process.env.ZOHO_PASSWORD }
     })
   : null;
