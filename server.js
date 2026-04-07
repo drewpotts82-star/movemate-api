@@ -4,6 +4,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const twilio = require('twilio');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -361,7 +362,7 @@ app.post('/webhook/stripe', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────────────────────
 const emailTransporter = process.env.ZOHO_USER && process.env.ZOHO_PASSWORD
-  ? require('nodemailer').createTransport({
+  ? nodemailer.createTransport({
       host: 'smtp.zoho.com.au',
       port: 587,
       secure: false,
