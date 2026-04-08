@@ -122,8 +122,8 @@ app.post('/auth/verify-otp', async (req, res) => {
     await supabase.from('otp_codes').update({ used: true }).eq('contact', contact.toLowerCase());
     const isEmail = contact.includes('@');
     const { data: partner } = isEmail
-      ? await supabase.from('partners').select('*').eq('email', contact.toLowerCase()).maybeSingle()
-      : await supabase.from('partners').select('*').eq('phone', formatAusPhone(contact)).maybeSingle();
+      ? await supabase.from('partners').select('*').eq('email', contact.toLowerCase()).order('created_at', {ascending: false}).limit(1).single()
+      : await supabase.from('partners').select('*').eq('phone', formatAusPhone(contact)).order('created_at', {ascending: false}).limit(1).single();
     if (!partner) return res.status(404).json({ error: 'Account not found' });
     res.json({ success: true, partner: { id: partner.id, business_name: partner.business_name, contact_name: partner.contact_name, phone: partner.phone, email: partner.email, services: partner.services, cities: partner.cities, credits: partner.credits || 0, tier: partner.tier } });
   } catch (err) {
