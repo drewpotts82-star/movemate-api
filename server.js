@@ -4,7 +4,8 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const twilio = require('twilio');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
+const resendClient = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 const app = express();
 
@@ -56,17 +57,12 @@ async function sendSMS(to, body) {
 }
 
 async function sendEmail(to, subject, body) {
-  if (!emailTransporter) {
-    console.log('[EMAIL SKIPPED] To: ' + to + ' | ' + subject);
+  if (!resendClient) {
+    console.log('[EMAIL SKIPPED] To: ' + to);
     return false;
   }
   try {
-    await emailTransporter.sendMail({
-      from: 'MoveMate <' + process.env.ZOHO_USER + '>',
-      to: to,
-      subject: subject,
-      text: body
-    });
+    await resendClient.emails.send({ from: 'MoveMate <hello@movemate.au>', to, subject, text: body });
     console.log('[EMAIL SENT] To: ' + to);
     return true;
   } catch(e) {
