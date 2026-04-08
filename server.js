@@ -77,7 +77,8 @@ function buildLeadSMS(lead, service, city) {
   const size = lead.property_size ? ` · ${lead.property_size}` : '';
   const route = lead.from_suburb ? ` · ${lead.from_suburb}${lead.to_suburb ? ' to ' + lead.to_suburb : ''}` : '';
   const apiBase = process.env.API_URL || 'https://movemate-api-production.up.railway.app';
-  return `MoveMate: New ${service} job in ${cityShort}${size}${route}${date}. Max 3 businesses competing. Get client contact for $15: ${apiBase}/lead/${lead.id}`;
+  const leadAmt = getLeadPrice(service).amount;
+  return `MoveMate: New ${service} job in ${cityShort}${size}${route}${date}. Max 3 businesses compete. Unlock client contact for $${leadAmt}: ${apiBase}/lead/${lead.id}`;
 }
 
 // ── POST /leads ───────────────────────────────────────────────────────────────
@@ -221,7 +222,7 @@ app.get('/lead/:id', async (req, res) => {
   }
 });
 
-// ── POST /lead/:id/unlock — Start $15 Stripe checkout ─────────────────────────
+// ── POST /lead/:id/unlock — Stripe checkout (price by service type) ────────────
 app.post('/lead/:id/unlock', async (req, res) => {
   try {
     const { businessPhone, businessName } = req.body;
