@@ -312,7 +312,8 @@ app.post('/partners/register', async (req, res) => {
 
     if (error) throw error;
 
-    await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new jobs in your area. Click the link to unlock customer contact for $15. movemate.au`);
+    const welcomePrice = serviceList[0] && serviceList[0].toLowerCase().includes('clean') ? 8 : 12;
+    await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new ${serviceList[0]} jobs in your area. Unlock customer contact for $${welcomePrice} per lead. movemate.au`);
 
     res.json({ success: true, partnerId: partner.id });
 
