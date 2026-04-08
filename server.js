@@ -315,7 +315,7 @@ app.post('/partners/register', async (req, res) => {
 
     const svcList = services && services.length ? services : ['Removalists'];
     const welcomePrice = svcList[0].toLowerCase().includes('clean') ? 8 : 12;
-    if (phone && isAusMobile(phone)) await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new ${svcList[0]} jobs in your area. Unlock client contact for $${welcomePrice} per lead. movemate.au`);
+    if (phone && (phone.startsWith('04') || phone.startsWith('+614'))) await sendSMS(phone, `Welcome to MoveMate, ${business_name}! You'll get SMS alerts for new ${svcList[0]} jobs in your area. Unlock client contact for $${welcomePrice} per lead. movemate.au`);
     else if (email) await sendEmail(email, `Welcome to MoveMate, ${business_name}!`, `Welcome to MoveMate! You'll receive email alerts for new ${svcList[0]} jobs. Unlock client contact for $${welcomePrice} per lead. movemate.au`);
 
     res.json({ success: true, partnerId: partner.id });
