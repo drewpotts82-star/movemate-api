@@ -357,15 +357,7 @@ app.post('/webhook/stripe', async (req, res) => {
 });
 
 // ── START ─────────────────────────────────────────────────────────────────────
-const emailTransporter = process.env.ZOHO_USER && process.env.ZOHO_PASSWORD
-  ? nodemailer.createTransport({
-      host: 'smtp.zoho.com.au',
-      port: 587,
-      secure: false,
-      requireTLS: true,
-      auth: { user: process.env.ZOHO_USER, pass: process.env.ZOHO_PASSWORD }
-    })
-  : null;
+// Email handled by Resend
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
